@@ -111,18 +111,7 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
         if (_configurationService.CookiesBrowser != Browser.None)
         {
             arguments.Add("--cookies-from-browser");
-            arguments.Add(_configurationService.CookiesBrowser switch
-            {
-                Browser.Brave => "brave",
-                Browser.Chrome => "chrome",
-                Browser.Chromium => "chromium",
-                Browser.Edge => "edge",
-                Browser.Firefox => "firefox",
-                Browser.Opera => "opera",
-                Browser.Vivaldi => "vivaldi",
-                Browser.Whale => "whale",
-                _ => string.Empty
-            });
+            arguments.Add(CookiesFromBrowserArgument);
         }
         else if (File.Exists(_configurationService.CookiesPath))
         {
@@ -168,7 +157,7 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
             "--print",
             "after_move:filepath"
         };
-        if (downloadOptions.Url.Host.Contains("instagram") && downloadOptions.PlaylistPosition != -1)
+        if (downloadOptions.RequiresPlaylistItems && downloadOptions.PlaylistPosition != -1)
         {
             arguments.Add("--playlist-items");
             arguments.Add($"{downloadOptions.PlaylistPosition}");
@@ -287,18 +276,7 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
         if (_configurationService.CookiesBrowser != Browser.None)
         {
             arguments.Add("--cookies-from-browser");
-            arguments.Add(_configurationService.CookiesBrowser switch
-            {
-                Browser.Brave => "brave",
-                Browser.Chrome => "chrome",
-                Browser.Chromium => "chromium",
-                Browser.Edge => "edge",
-                Browser.Firefox => "firefox",
-                Browser.Opera => "opera",
-                Browser.Vivaldi => "vivaldi",
-                Browser.Whale => "whale",
-                _ => string.Empty
-            });
+            arguments.Add(CookiesFromBrowserArgument);
         }
         else if (File.Exists(_configurationService.CookiesPath))
         {
@@ -363,7 +341,7 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
         {
             arguments.Add("--embed-chapters");
         }
-        if (_configurationService.UseAria)
+        if (_configurationService.UseAria && downloadOptions.TimeFrame is null)
         {
             arguments.Add("--downloader");
             arguments.Add(Desktop.System.Environment.FindDependency("aria2c") ?? "aria2c");
@@ -416,11 +394,33 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
             }
         }
         var formatString = string.Empty;
+        var audioSelector = string.Empty;
+        var audioHandled = false;
+        var avoidOpus = OperatingSystem.IsWindows() && downloadOptions.Url.Host.Contains("youtube") && _configurationService.PreferredAudioCodec == AudioCodec.Any && downloadOptions.FileType != MediaFileType.WEBM;
+        if (downloadOptions.AudioFormat is not null && downloadOptions.AudioFormat != Format.NoneAudio)
+        {
+            audioSelector = downloadOptions.AudioFormat switch
+            {
+                var f when f == Format.BestAudio => avoidOpus ? "(bestaudio[acodec!=opus]/bestaudio)" : "bestaudio",
+                var f when f == Format.WorstAudio => "worstaudio",
+                _ => downloadOptions.AudioFormat.Id
+            };
+        }
+        if (downloadOptions.AudioBitrate.HasValue)
+        {
+            var noOpus = avoidOpus ? "[acodec!=opus]" : string.Empty;
+            audioSelector = downloadOptions.AudioBitrate.Value switch
+            {
+                var b when b == double.MaxValue => avoidOpus ? "(bestaudio[acodec!=opus]/bestaudio)" : "bestaudio",
+                var b when b == -1.0 => "worstaudio",
+                _ => $"(bestaudio[abr={downloadOptions.AudioBitrate.Value}]{noOpus}/bestaudio[abr<={downloadOptions.AudioBitrate.Value}]{noOpus}/bestaudio)"
+            };
+        }
         if (downloadOptions.VideoFormat is not null && downloadOptions.VideoFormat != Format.NoneVideo)
         {
             if (!downloadOptions.FileType.IsAudio)
             {
-                formatString += downloadOptions.VideoFormat switch
+                formatString = downloadOptions.VideoFormat switch
                 {
                     var f when f == Format.BestVideo => "bestvideo*",
                     var f when f == Format.WorstVideo => "worstvideo*",
@@ -429,55 +429,47 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
             }
             else if (downloadOptions.VideoFormat.ContainsAudio && (downloadOptions.AudioFormat is null || downloadOptions.AudioFormat == Format.NoneAudio))
             {
-                formatString += downloadOptions.VideoFormat.Id;
+                formatString = downloadOptions.VideoFormat.Id;
             }
         }
         else if (downloadOptions.VideoResolution is not null && !downloadOptions.FileType.IsAudio)
         {
-            formatString += downloadOptions.VideoResolution switch
+            var audio = string.IsNullOrEmpty(audioSelector) ? string.Empty : $"+{audioSelector}";
+            formatString = downloadOptions.VideoResolution switch
             {
-                var v when v == VideoResolution.Best => "bestvideo*",
-                var v when v == VideoResolution.Worst => "worstvideo*",
-                _ => $"bestvideo*[height={downloadOptions.VideoResolution.Height}]/bestvideo*[height<={downloadOptions.VideoResolution.Height}]/bestvideo*"
+                var v when v == VideoResolution.Best => $"bestvideo*{audio}",
+                var v when v == VideoResolution.Worst => $"worstvideo*{audio}",
+                _ => $"bestvideo*[height={downloadOptions.VideoResolution.Height}]{audio}/bestvideo*[width={downloadOptions.VideoResolution.Height}]{audio}/bestvideo*[height<={downloadOptions.VideoResolution.Height}]{audio}/bestvideo*[width<={downloadOptions.VideoResolution.Height}]{audio}/bestvideo*{audio}"
             };
+            audioHandled = !string.IsNullOrEmpty(audioSelector);
         }
-        var avoidOpus = OperatingSystem.IsWindows() && downloadOptions.Url.Host.Contains("youtube") && _configurationService.PreferredAudioCodec == AudioCodec.Any && downloadOptions.FileType != MediaFileType.WEBM;
-        if (downloadOptions.AudioFormat is not null && downloadOptions.AudioFormat != Format.NoneAudio)
+        if (!audioHandled && !string.IsNullOrEmpty(audioSelector))
         {
             if (!string.IsNullOrEmpty(formatString))
             {
-                formatString += "+";
+                formatString += $"+{audioSelector}";
             }
-            else if (downloadOptions.FileType.IsVideo)
+            else if (downloadOptions.FileType.IsVideo && downloadOptions.AudioFormat is not null && downloadOptions.AudioFormat != Format.NoneAudio)
             {
-                formatString += downloadOptions.AudioFormat switch
-                {
-                    var f when f == Format.WorstAudio => "worstvideo*+",
-                    _ => "bestvideo*+",
-                };
+                var videoPrefix = downloadOptions.AudioFormat == Format.WorstAudio ? "worstvideo*" : "bestvideo*";
+                formatString = $"{videoPrefix}+{audioSelector}";
             }
-            formatString += downloadOptions.AudioFormat switch
+            else
             {
-                var f when f == Format.BestAudio => avoidOpus ? "bestaudio[acodec!=opus]" : "bestaudio",
-                var f when f == Format.WorstAudio => "worstaudio",
-                _ => downloadOptions.AudioFormat.Id
-            };
-        }
-        else if (downloadOptions.AudioBitrate.HasValue)
-        {
-            if (!string.IsNullOrEmpty(formatString))
-            {
-                formatString += "+";
+                formatString = audioSelector;
             }
-            formatString += downloadOptions.AudioBitrate.Value switch
-            {
-                var b when b == double.MaxValue => avoidOpus ? "bestaudio[acodec!=opus]" : "bestaudio",
-                var b when b == -1.0 => "worstaudio",
-                _ => $"bestaudio[abr={downloadOptions.AudioBitrate.Value}]{(avoidOpus ? "[acodec!=opus]" : string.Empty)}/bestaudio[abr<={downloadOptions.AudioBitrate.Value}]{(avoidOpus ? "[acodec!=opus]" : string.Empty)}/bestaudio"
-            };
         }
         if (!string.IsNullOrEmpty(formatString))
         {
+            if (formatString.Contains('+'))
+            {
+                var lastSlashIndex = formatString.LastIndexOf('/');
+                var lastFallback = lastSlashIndex >= 0 ? formatString[(lastSlashIndex + 1)..] : formatString;
+                if (lastFallback.Contains('+'))
+                {
+                    formatString += formatString.StartsWith("worst", StringComparison.Ordinal) ? "/worst" : "/best";
+                }
+            }
             arguments.Add("--format");
             arguments.Add(formatString);
         }
@@ -555,7 +547,10 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
         {
             arguments.Add("--download-sections");
             arguments.Add($"*{downloadOptions.TimeFrame.ToString()}");
-            arguments.Add("--force-keyframes-at-cuts");
+            if (downloadOptions.VideoFormat?.Protocol == "https" || downloadOptions.AudioFormat?.Protocol == "https")
+            {
+                arguments.Add("--force-keyframes-at-cuts");
+            }
         }
         arguments.AddRange(_configurationService.YtdlpDownloadArgs.SplitCommandLine());
         return new Process()
@@ -574,7 +569,7 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
     public override async Task<bool> DownloadUpdateAsync(AppVersion version, IProgress<DownloadProgress>? progress = null)
     {
         var path = OperatingSystem.IsWindows() ? Path.Combine(UserDirectories.LocalData, "yt-dlp.exe") : Path.Combine(UserDirectories.LocalData, "yt-dlp");
-        var res = version.BaseVersion.Revision > 0 ? await _previewUpdaterService.DownloadReleaseAssetAsync(version, path, _assetName, true, progress) : await _updaterService.DownloadReleaseAssetAsync(version, path, _assetName, true, progress);
+        var res = version.BaseVersion.Revision > 0 ? await _previewUpdaterService!.DownloadReleaseAssetAsync(version, path, _assetName, true, progress) : await _updaterService.DownloadReleaseAssetAsync(version, path, _assetName, true, progress);
         if (res)
         {
             var configKey = $"installed_{_executableName}_appversion";
@@ -595,6 +590,59 @@ public class YtdlpExecutableService : DependencyExecutableService, IYtdlpExecuta
             }
         }
         return res;
+    }
+
+    private string CookiesFromBrowserArgument
+    {
+        get
+        {
+            var browser = _configurationService.CookiesBrowser switch
+            {
+                Browser.Brave => "brave",
+                Browser.Chrome => "chrome",
+                Browser.Chromium => "chromium",
+                Browser.Edge => "edge",
+                Browser.Firefox => "firefox",
+                Browser.Opera => "opera",
+                Browser.Vivaldi => "vivaldi",
+                Browser.Whale => "whale",
+                _ => string.Empty
+            };
+            if (Desktop.System.Environment.DeploymentMode == DeploymentMode.Flatpak)
+            {
+                var home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+                var path = string.Empty;
+                if (_configurationService.CookiesBrowser == Browser.Firefox)
+                {
+                    var candidates = new[]
+                    {
+                        Path.Combine(home, ".mozilla", "firefox"),
+                        Path.Combine(home, ".config", "mozilla", "firefox"),
+                        Path.Combine(home, "snap", "firefox", "common", ".mozilla", "firefox")
+                    };
+                    path = candidates.FirstOrDefault(Directory.Exists) ?? candidates[0];
+                }
+                else
+                {
+                    path = _configurationService.CookiesBrowser switch
+                    {
+                        Browser.Brave => Path.Combine(home, ".config", "BraveSoftware", "Brave-Browser"),
+                        Browser.Chrome => Path.Combine(home, ".config", "google-chrome"),
+                        Browser.Chromium => Path.Combine(home, ".config", "chromium"),
+                        Browser.Edge => Path.Combine(home, ".config", "microsoft-edge"),
+                        Browser.Opera => Path.Combine(home, ".config", "opera"),
+                        Browser.Vivaldi => Path.Combine(home, ".config", "vivaldi"),
+                        Browser.Whale => Path.Combine(home, ".config", "naver-whale"),
+                        _ => string.Empty
+                    };
+                }
+                if (!string.IsNullOrEmpty(path))
+                {
+                    browser += $":{path}";
+                }
+            }
+            return browser;
+        }
     }
 
     private bool HasPartialDownloadFiles(string saveFolder, string saveFilename)
